@@ -238,6 +238,106 @@ function Scene({ cameras = [], controls = {}, selectedId, setSelectedId }) {
   );
 }
 
+function CaptureRegistrar({ setSavePngFn }) {
+  // Registers a capture function that renders with black background and 4:3 aspect
+  const { gl, scene, camera } = useThree((s) => ({ gl: s.gl, scene: s.scene, camera: s.camera }));
+
+  useEffect(() => {
+    if (!gl || !scene || !camera || !setSavePngFn) return;
+
+    const save = () => {
+      const renderer = gl;
+      const canvas = renderer.domElement;
+      if (!canvas) return;
+
+      const width = canvas.width;
+      const height = canvas.height;
+      const targetW = Math.min(width, Math.floor(height * 4 / 3));
+      const targetH = Math.min(height, Math.floor(width * 3 / 4));
+      const offsetX = Math.floor((width - targetW) / 2);
+      const offsetY = Math.floor((height - targetH) / 2);
+
+      const filename = `camera-frustums-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+
+      // Save renderer and camera state
+      const prevClearColor = renderer.getClearColor(new THREE.Color());
+      const prevClearAlpha = renderer.getClearAlpha();
+      const prevAutoClear = renderer.autoClear;
+      const prevScissorTest = renderer.getScissorTest ? renderer.getScissorTest() : false;
+      const isPerspective = typeof camera.aspect === 'number';
+      const prevAspect = isPerspective ? camera.aspect : undefined;
+
+      try {
+        // Set black background and render with 4:3 aspect
+        renderer.setClearColor(0x000000, 1);
+        renderer.autoClear = true;
+        // Clear full canvas to black first
+        renderer.setViewport(0, 0, width, height);
+        renderer.setScissor(0, 0, width, height);
+        renderer.setScissorTest(true);
+        renderer.clear(true, true, true);
+
+        if (isPerspective) {
+          camera.aspect = 4 / 3;
+          camera.updateProjectionMatrix?.();
+        }
+
+        // Render into centered 4:3 viewport
+        renderer.setViewport(offsetX, offsetY, targetW, targetH);
+        renderer.setScissor(offsetX, offsetY, targetW, targetH);
+        renderer.setScissorTest(true);
+        renderer.render(scene, camera);
+
+        // Crop to largest centered 4:3 area
+        const exportCanvas = document.createElement('canvas');
+        exportCanvas.width = targetW;
+        exportCanvas.height = targetH;
+        const ctx = exportCanvas.getContext('2d');
+        ctx.drawImage(canvas, offsetX, offsetY, targetW, targetH, 0, 0, targetW, targetH);
+
+        if (exportCanvas.toBlob) {
+          exportCanvas.toBlob((blob) => {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          }, 'image/png');
+        } else {
+          const dataUrl = exportCanvas.toDataURL('image/png');
+          const a = document.createElement('a');
+          a.href = dataUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
+      } finally {
+        // Restore state
+        renderer.setClearColor(prevClearColor, prevClearAlpha);
+        renderer.autoClear = prevAutoClear;
+        renderer.setViewport(0, 0, width, height);
+        renderer.setScissor(0, 0, width, height);
+        renderer.setScissorTest(prevScissorTest);
+        if (isPerspective && prevAspect) {
+          camera.aspect = prevAspect;
+          camera.updateProjectionMatrix?.();
+        }
+      }
+    };
+
+    const wrapped = () => requestAnimationFrame(save);
+    setSavePngFn(() => wrapped);
+    return () => setSavePngFn(null);
+  }, [gl, scene, camera, setSavePngFn]);
+
+  return null;
+}
+
 // -------------------------- Main App --------------------------
 
 export default function CameraFrustumsApp() {
@@ -256,6 +356,8 @@ export default function CameraFrustumsApp() {
   const [worldUp, setWorldUp] = useState('z'); // 'y' or 'z' (default Z-up)
   const [selectedId, setSelectedId] = useState(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const canvasRef = useRef(null); // holds WebGL canvas element
+  const [savePngFn, setSavePngFn] = useState(null); // capture function registered from Canvas
 
   const fovX = useMemo(() => {
     // Use the first group's camera_angle_x if present
@@ -439,38 +541,31 @@ export default function CameraFrustumsApp() {
             Load Sample
           </button>
 
-          <div className="flex items-center gap-3 text-sm">
-            <div className="flex items-center gap-1">
-              <span className="opacity-60">Aspect</span>
-              <input type="number" step="0.01" value={aspect} onChange={e=>setAspect(parseFloat(e.target.value)||1)} className="w-20 px-2 py-1 rounded-md border border-black/10" />
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="opacity-60">Near</span>
-              <input type="number" step="0.01" value={near} onChange={e=>setNear(Math.max(0.001, parseFloat(e.target.value)||0.1))} className="w-20 px-2 py-1 rounded-md border border-black/10" />
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="opacity-60">Far</span>
-              <input type="number" step="0.01" value={far} onChange={e=>setFar(Math.max(near, parseFloat(e.target.value)||2))} className="w-20 px-2 py-1 rounded-md border border-black/10" />
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="opacity-60">Scale</span>
-              <input type="number" step="0.1" value={scale} onChange={e=>setScale(Math.max(0.01, parseFloat(e.target.value)||1))} className="w-20 px-2 py-1 rounded-md border border-black/10" />
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="flex items-center gap-1"><input type="checkbox" checked={showGrid} onChange={e=>setShowGrid(e.target.checked)} /> Grid</label>
-              <label className="flex items-center gap-1"><input type="checkbox" checked={showAxes} onChange={e=>setShowAxes(e.target.checked)} /> Axes</label>
-              <label className="flex items-center gap-1"><input type="checkbox" checked={showLabels} onChange={e=>setShowLabels(e.target.checked)} /> Labels</label>
-              <label className="flex items-center gap-1"><input type="checkbox" checked={invertMatrices} onChange={e=>setInvertMatrices(e.target.checked)} /> Invert matrices</label>
-              <label className="flex items-center gap-1">
-                <span className="opacity-60">World Up</span>
-                <select value={worldUp} onChange={e=>setWorldUp(e.target.value)} className="px-2 py-1 rounded-md border border-black/10">
-                  <option value="y">Y-up (Three)</option>
-                  <option value="z">Z-up (Blender)</option>
-                </select>
-              </label>
-              <label className="flex items-center gap-1"><input type="checkbox" checked={showDiagnostics} onChange={e=>setShowDiagnostics(e.target.checked)} /> Diagnostics</label>
-            </div>
-          </div>
+          <button
+            className="text-sm font-medium px-3 py-1.5 rounded-xl bg-white border border-black/10 hover:bg-slate-50"
+            onClick={() => {
+              if (typeof savePngFn === 'function') {
+                savePngFn();
+                return;
+              }
+              // Fallback: simple canvas capture if registrar not ready
+              const canvas = canvasRef.current;
+              if (!canvas) return;
+              const filename = `camera-frustums-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+              requestAnimationFrame(() => {
+                const a = document.createElement('a');
+                a.href = canvas.toDataURL('image/png');
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              });
+            }}
+            title="Save current view as PNG"
+            aria-label="Save PNG"
+          >
+            Save PNG
+          </button>
         </div>
       </div>
 
@@ -504,10 +599,11 @@ export default function CameraFrustumsApp() {
               {groups.map((g, i) => (
                 <div key={g.id} className="flex items-center gap-3 py-2">
                   <button
-                    className={`shrink-0 w-5 h-5 rounded-none flex items-center justify-center transition-all ${g.visible ? 'ring-2 ring-slate-400' : 'opacity-40'}`}
+                    className={`shrink-0 w-5 h-5 rounded-none flex items-center justify-center transition-all ${g.visible ? 'ring-2 ring-slate-400' : ''}`}
                     style={{ background: g.color?.getStyle?.() ?? g.color }}
                     onClick={() => setGroups(prev=>prev.map((pg,j)=> j===i?{...pg,visible:!pg.visible}:pg))}
                     title={g.visible ? 'Click to hide this group' : 'Click to show this group'}
+                    aria-pressed={g.visible}
                   >
                     {g.visible ? <span className="text-white text-xs leading-none">✓</span> : null}
                   </button>
@@ -535,11 +631,14 @@ export default function CameraFrustumsApp() {
         <Canvas
           className="w-full h-full"
           camera={{ position: [6, 4, 6], fov: 50 }}
+          gl={{ preserveDrawingBuffer: true }}
+          onCreated={({ gl }) => { canvasRef.current = gl.domElement; }}
           dpr={[1, 2]}
           raycaster={{ params: { Line: { threshold: 0.1 }}}}
           onPointerDown={(e)=>e.stopPropagation()}
           onPointerMissed={() => setSelectedId(null)}
         >
+          <CaptureRegistrar setSavePngFn={setSavePngFn} />
           <Scene
             cameras={cameras}
             controls={{ fovX, aspect, near: nearScaled, far: farScaled, showGrid, showAxes, showLabels }}
@@ -547,6 +646,42 @@ export default function CameraFrustumsApp() {
             setSelectedId={setSelectedId}
           />
         </Canvas>
+      </div>
+
+      {/* Bottom controls bar (moved from top) */}
+      <div className="sticky bottom-0 z-20 backdrop-blur bg-white/70 border-t border-black/5">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3 text-sm">
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">Aspect</span>
+            <input type="number" step="0.01" value={aspect} onChange={e=>setAspect(parseFloat(e.target.value)||1)} className="w-20 px-2 py-1 rounded-md border border-black/10" />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">Near</span>
+            <input type="number" step="0.01" value={near} onChange={e=>setNear(Math.max(0.001, parseFloat(e.target.value)||0.1))} className="w-20 px-2 py-1 rounded-md border border-black/10" />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">Far</span>
+            <input type="number" step="0.01" value={far} onChange={e=>setFar(Math.max(near, parseFloat(e.target.value)||2))} className="w-20 px-2 py-1 rounded-md border border-black/10" />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">Scale</span>
+            <input type="number" step="0.1" value={scale} onChange={e=>setScale(Math.max(0.01, parseFloat(e.target.value)||1))} className="w-20 px-2 py-1 rounded-md border border-black/10" />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1"><input type="checkbox" checked={showGrid} onChange={e=>setShowGrid(e.target.checked)} /> Grid</label>
+            <label className="flex items-center gap-1"><input type="checkbox" checked={showAxes} onChange={e=>setShowAxes(e.target.checked)} /> Axes</label>
+            <label className="flex items-center gap-1"><input type="checkbox" checked={showLabels} onChange={e=>setShowLabels(e.target.checked)} /> Labels</label>
+            <label className="flex items-center gap-1"><input type="checkbox" checked={invertMatrices} onChange={e=>setInvertMatrices(e.target.checked)} /> Invert matrices</label>
+            <label className="flex items-center gap-1">
+              <span className="opacity-60">World Up</span>
+              <select value={worldUp} onChange={e=>setWorldUp(e.target.value)} className="px-2 py-1 rounded-md border border-black/10">
+                <option value="y">Y-up (Three)</option>
+                <option value="z">Z-up (Blender)</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1"><input type="checkbox" checked={showDiagnostics} onChange={e=>setShowDiagnostics(e.target.checked)} /> Diagnostics</label>
+          </div>
+        </div>
       </div>
 
       {/* Footer info + self tests (toggleable) */}
